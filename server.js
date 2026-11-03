@@ -23,6 +23,7 @@ const LEGACY_STATE_FILE = path.join(DATA_DIR, 'merit-state.json');
 
 fs.mkdirSync(TTS_CACHE_DIR, { recursive: true });
 
+
 // ============================================================================
 // 1. BÁCH KHOA CÁ & THỦY QUÁI (FISH CATALOG)
 // ============================================================================
@@ -350,47 +351,76 @@ class ZeroTTSManager {
   }
 
   handleWorkerLine(line) {
-    try {
-      const msg = JSON.parse(line);
-      if (msg.type === 'status') {
-        this.status = msg.status;
-        this.model = msg.model || this.model;
-        broadcastNotification('tts.status', this.getStatus());
-      } else if (msg.type === 'ready') {
-        this.ready = true;
-        this.status = 'ready';
-        this.voice = msg.voice || 'maichi';
-        this.voices = msg.voices || ['maichi'];
-        this.model = msg.model || this.model;
-        console.log(`[ZeroTTS] Sẵn sàng! Giọng: ${this.voice}`);
-        broadcastNotification('tts.status', this.getStatus());
-      } else if (msg.type === 'result' && msg.id != null) {
+  try {
+    const msg = JSON.parse(line);
+
+    if (msg.type === 'status') {
+      this.status = msg.status;
+      this.model = msg.model || this.model;
+
+      broadcastNotification('tts.status', this.getStatus());
+
+    } else if (msg.type === 'ready') {
+      this.ready = true;
+      this.status = 'ready';
+      this.voice = msg.voice || 'maichi';
+      this.voices = msg.voices || ['maichi'];
+      this.model = msg.model || this.model;
+
+      console.log(`[ZeroTTS] Sẵn sàng! Giọng: ${this.voice}`);
+
+      broadcastNotification('tts.status', this.getStatus());
+
+    } else if (msg.type === 'result' && msg.id != null) {
+      const pending = this.pending.get(msg.id);
+
+      if (pending) {
+        clearTimeout(pending.timer);
+        this.pending.delete(msg.id);
+
+        // Hỗ trợ cả hai kiểu tên trường từ Python Worker
+        const filename = msg.file || msg.filename;
+
+        if (!filename) {
+          pending.resolve({
+            ok: false,
+            error: 'Worker không trả về tên file âm thanh'
+          });
+          return;
+        }
+
+        pending.resolve({
+          ok: true,
+          url: `/data/tts-cache/${filename}`,
+          duration: msg.durationSec ?? msg.duration,
+          elapsed: msg.synthSec ?? msg.elapsed,
+          cached: !!msg.cached,
+          voice: msg.voice || this.voice
+        });
+      }
+
+    } else if (msg.type === 'error') {
+      console.warn(`[ZeroTTS Error] ${msg.error}`);
+
+      if (msg.id != null) {
         const pending = this.pending.get(msg.id);
+
         if (pending) {
           clearTimeout(pending.timer);
           this.pending.delete(msg.id);
+
           pending.resolve({
-            ok: true,
-            url: `/data/tts-cache/${msg.filename}`,
-            duration: msg.duration,
-            elapsed: msg.elapsed,
-            cached: !!msg.cached,
-            voice: msg.voice || this.voice
+            ok: false,
+            error: msg.error
           });
         }
-      } else if (msg.type === 'error') {
-        console.warn(`[ZeroTTS Error] ${msg.error}`);
-        if (msg.id != null) {
-          const pending = this.pending.get(msg.id);
-          if (pending) {
-            clearTimeout(pending.timer);
-            this.pending.delete(msg.id);
-            pending.resolve({ ok: false, error: msg.error });
-          }
-        }
       }
-    } catch (_) {}
+    }
+
+  } catch (err) {
+    console.error('[ZeroTTS] Lỗi xử lý dữ liệu Worker:', err.message);
   }
+}
 
   synthesize(text, voice = 'maichi') {
     const clean = String(text || '').trim();
@@ -1325,6 +1355,11 @@ app.use(express.urlencoded({ extended: true }));
 // Tĩnh tài nguyên
 app.use(express.static(path.join(__dirname, 'public')));
 app.use('/data/tts-cache', express.static(TTS_CACHE_DIR));
+
+// khai báo admin route
+app.get('/admin', (req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'admin.html'));
+});
 
 // JSON-RPC 2.0 HTTP Endpoint
 app.post('/rpc', async (req, res) => {
